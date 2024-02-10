@@ -1,0 +1,13 @@
+Reference dates used for the climwin analyses: Sep 15 (make sure all roosted)
+
+Maximum length of time window: (go back to Jan)
+	- Temperature: 	jan 258
+	- Precipitation: jan 258
+	- Wind: 					        15+31+31+30=107    back to june
+	- EVI:                        jan
+	- LakeTemp:                   jan
+
+Minimum Length of time window:  14 
+
+LatLon of Great Lakes Center: 44.9072, -84.7197 
+

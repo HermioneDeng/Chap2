@@ -1,0 +1,213 @@
+---
+title: "Temporal_Interpolation_MODIS"
+author: "Yuting Deng"
+date: "2023-02-09"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+ReqPackages = c("terra", "gdalUtils", "fs", "rts", "stringi", "lubridate", "mgcv", "data.table", "ggplot2", "dplyr")
+#install.packages(ReqPackages)
+invisible(lapply(ReqPackages, library, character.only = T, quietly = T))
+```
+
+## Read in the files and create raster stack
+
+```{r}
+input_aqua_temp = dir_ls("/Volumes/T7/MYD21A2_Masked")
+output = "./data"
+
+# SpatRaster
+r <- rast(input_aqua_temp)
+
+r_Rescaled = aggregate(r, fact=4, fun=mean) #1/4 of the orginal size - 4 x 4 km
+writeRaster(r_Rescaled, file.path(output, "/Rasters/5_MYD21A2_GreatLakesTemp_aggregated.tif"), overwrite=TRUE)
+#plot(r_Rescaled[[100:102]])
+```
+
+## Create raster stack time series and extract values for each pixel
+
+```{r}
+year = stri_sub(input_aqua_temp, -14, -11)
+yday = stri_sub(input_aqua_temp, -10, -8)
+yday <- as.numeric(sub("^0+", "", yday)) #Delete Leading Zeros Using sub() Function
+d = as.Date(yday, origin = paste0(year, "-01-01"))
+
+
+rt <- rts(r_Rescaled,d) # creating a RasterStackTS object
+plot(rt[[c(100:102)]]) # plot the 100th to 102rd raster file
+
+# Extract time series from a pixel
+# you may use cellFromXY to get the cell number of a location given its coordinate
+c <- cellFromXY(rt, matrix(c(-87, 42), nrow=1))
+plot(rt[c])
+extract(rt, 77368)
+# This is how to get the values from a single pixel
+```
+
+## Analyzing seasonal time series with GAM
+
+```{r}
+d_all = seq(as.Date('2003-01-01'), as.Date('2020-12-31'), by = "1 days")
+
+Database_Arr = array(NA_real_,
+                               dim = c(dim(r_Rescaled)[1],
+                                       dim(r_Rescaled)[2],
+                                       length(d_all)))
+start = Sys.time()
+for (i in 1:dim(r_Rescaled)[1]){
+  for (j in 1:dim(r_Rescaled)[2]){
+                  
+c = cellFromRowCol(rt, i, j)
+cat('Index number:', c, '\n')
+
+df = data.frame(doy = yday(d), year = year(d), date = d, aqua = extract(rt, c))
+df = na.omit(df)
+
+if (nrow(df)<10){
+  Database_Arr[i,j,] = NA
+}
+else{
+# gam.model <- gam(aqua ~ s(year, bs = "tp", k = length(unique(df$year))) +
+#                    s(doy, bs = 'cc', k = length(unique(df$doy))),
+#                  data = df,
+#                  family = gaussian)
+
+gam.model <- gam(aqua ~ te(year, doy, 
+                        k = length(unique(df$year)),
+                        bs = c("ps", "cr")),
+                 data = df,
+                 family = gaussian)
+
+#summary(gam.model)
+
+# datas <- rbindlist(list(subset(df, select=c(aqua, date)),
+#                         data.table(aqua = gam.model$fitted.values,
+#                                    date = df$date)))
+# datas$type = c(rep("Real", nrow(df)), rep("Fitted", nrow(df)))
+# 
+# ggplot(data = datas, aes(date, aqua, group = type, colour = type)) +
+#   geom_line(size = 1) +
+#   theme_bw() +
+#   labs(x = "Time", y = "Water Temperature")
+
+
+df_daily = data.frame(date = d_all) %>% 
+  mutate(year=year(date),
+         doy=yday(date))
+df_daily = df_daily %>% mutate(aqua = predict.gam(gam.model, newdata=df_daily))
+
+# ggplot() +
+#   geom_line(data = datas, aes(date, aqua, group = type, colour = type), size = 1) +
+#   geom_line(data=df_filled, aes(date, aqua))+
+#   theme_bw() +
+#   labs(x = "Time", y = "Water Temperature")
+
+# fill in the temporal gaps (keep the original measurements, only add estimates for the days without measurements)
+df_filled = rbind(df, df_daily[!df_daily$date %in% df$date,]) 
+df_filled = df_filled[order(as.Date(df_filled$date, format="%Y-%m-%d")),]
+
+Database_Arr[i,j,] = df_filled$aqua
+
+        }
+    }
+}
+end = Sys.time()
+end-start
+```
+
+
+## Save the data into 3D array and a raster brick
+
+```{r}
+# Convert the array to a rasterbrick object
+# ===============================================================
+Outputbrick = rast(Database_Arr)
+ext(Outputbrick) = ext(r)
+crs(Outputbrick) = crs(r)
+# creating a RasterStackTS object:
+d_all = seq(as.Date('2003-01-01'), as.Date('2020-12-31'), by = "1 days")
+Outputbrick_rts <- rts(Outputbrick, d_all)
+
+# Agregate again by a factor of 4 (16 x 16 km)
+# ===============================================================
+Outputbrick_Rescaled = aggregate(Outputbrick, fact=2, fun=mean)
+
+# Write the raster to a file
+# ===============================================================
+CurrOutputfile = file.path(output,"Rasters/5_MYD21A2_GreatLakesTemp_interpolated.tif")
+dir.create(dirname(CurrOutputfile), showWarnings = F, recursive = T)
+write.rts(Outputbrick_rts, CurrOutputfile, overwrite=TRUE)
+
+CurrOutputfile.2 = file.path("./data/Rasters/5_MYD21A2_GreatLakesTemp_interpolated_rescaled.tif")
+writeRaster(Outputbrick_Rescaled, CurrOutputfile.2, overwrite=TRUE)
+
+Outputbrick = rast(CurrOutputfile)
+Outputbrick_Rescaled = rast(CurrOutputfile.2)
+Outputbrick_Rescaled_rts = rts(Outputbrick_Rescaled, d_all)
+
+# Convert the current database to an array of the desired size
+# ===============================================================
+Outputbrick_Rescaled  = rast("./data/Rasters/5_MYD21A2_GreatLakesTemp_interpolated_rescaled.tif")
+Outputbrick_Rescaled_array = as.array(Outputbrick_Rescaled)
+
+Database_Arr = array(NA_real_,
+                     dim = c(dim(Outputbrick_Rescaled)[1]*dim(Outputbrick_Rescaled)[2],
+                             dim(Outputbrick_Rescaled)[3], 1))
+
+# j represents each day of the data (7671 days in total)
+for (j in 1:dim(Outputbrick_Rescaled)[3]){
+  Database_Arr[,j,1] = Outputbrick_Rescaled_array[,,j]
+}
+
+dimnames(Database_Arr) = list(NULL, as.character(d_all), "aqua_temp")
+saveRDS(Database_Arr, file = "./data/5_MYD21A2_GreatLakesTemp_interpolated_rescaled.rds")
+Database_Clim = readRDS(file = "./data/5_MYD21A2_GreatLakesTemp_interpolated_rescaled.rds")
+```
+
+## Checking the results
+
+```{r}
+plot(Outputbrick_Rescaled[[1:10]])
+
+for(i in 1:6575) {       # Printing ggplot within for-loop
+  print(
+  ggplot() +
+    geom_spatraster(data = Outputbrick_Rescaled[[i]]) +
+    scale_fill_whitebox_c(
+     palette = "muted",
+    labels = scales::label_number(suffix = "º")
+    ) +
+    labs(fill = "temperature")+
+    theme_classic()
+    )
+  Sys.sleep(2)
+}
+
+for(i in seq(1,160,16)) {       # Printing ggplot within for-loop
+  print(
+  plot(Outputbrick_Rescaled_rts, i:(i+16))
+    )
+  Sys.sleep(2)
+}
+
+pdf("plots.pdf")
+for (i in seq(1,3280,16)) {
+    print(
+  plot(Outputbrick_Rescaled_rts, i:(i+16))
+    )
+}
+dev.off()
+
+for(i in c:c+2) {       # Printing ggplot within for-loop
+  print(
+  plot(Outputbrick_Rescaled_rts[i])
+    )
+  Sys.sleep(2)
+}
+```
+

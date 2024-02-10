@@ -1,0 +1,178 @@
+---
+title: "MODIS_GreenupData_Process"
+author: "Yuting Deng"
+date: "6/8/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, message=F, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, cache = TRUE)
+#devtools::install_github("gearslaboratory/gdalUtils")
+
+library(terra)
+library(gdalUtils)
+library(raster)
+library(fs)
+library(stringi)
+library(stringr)
+library(raster)
+library(rgdal)
+library(rgeos)
+library(sf)
+library(stringi)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+```
+
+Extract one greenup metrics and save as tiff file from the hdf5 file
+
+```{r, eval=F, echo=T}
+# Get a list of sds names
+#path = dir_ls("~/Downloads/MYD21A2.V061")
+path = list.files("/Volumes/T7/MOD13A2_EVI_h13", full.names = T)
+output = dir_ls("/Volumes/T7/MOD13A2_EVI_tif")
+output_path = '/Volumes/T7/MOD13A2_EVI_tif'
+dir.create(output_path)
+
+
+for (i in seq(1, length(path))){
+  
+  cat('Index number:', paste0(stri_sub(path[i], -45, -19)), '\n')
+    
+if (file_exists(str_subset(output, paste0(stri_sub(path[i], -45, -19))))){
+  next
+}
+
+# use gdalUtils pckage
+# sds <- get_subdatasets(path[[i]])
+# name <- sds[2] #EVI
+# gdal_translate(sds[2], file.path(output_path, paste0(stri_sub(path[i], -45, -4),"tif")), of="GTiff",
+# 	co="TILED=YES",verbose=TRUE)
+
+# use terra
+hdffile <- sds(path[[i]])
+#plot(hdffile[2])
+writeRaster(hdffile[2], 
+            file.path(output_path, paste0(stri_sub(path[i], -45, -4),"tif")),
+            datatype = "FLT8S", overwrite=FALSE)
+
+}
+```
+
+
+Merge h09v04, h10v03, h10v04, h11v03, h11v04, h12v03, h12v04, h13v03, h13v04 (9 tiles) into a single map for each time
+
+```{r, eval=FALSE, echo=T}
+# Merge the raster
+#paths = dir_ls("/Users/hermione/Downloads/MYD21A2_Processed")
+paths = dir_ls("/Volumes/T7/MOD13A2_EVI_tif")
+paths = paths[order(basename(paths))]
+day_list = data.frame(list(stri_sub(paths, -36,-30)))
+colnames(day_list) = 'ID'
+day_list = day_list %>% distinct(ID)
+
+# The CRS for the radar station coordinates is EPSG:4326:
+crs_4326 <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84")
+
+tmp="/Volumes/T7/MOD13A2_EVI_tif_merged2"
+dir.create(tmp)
+  
+for (i in seq(32, nrow(day_list), 1)){
+  
+  cat('Index number:', day_list[i,], '\n')
+  
+  # tiles = list.files('F:/MOD13A2_EVI_tif', pattern = day_list$ID[i], full.names = T)
+  # rast_list = list()
+  # for (i in 1:length(tiles)) {
+  # rast_list[i] = rast(tiles[i])
+  # }
+  # # with many SpatRasters, make a SpatRasterCollection from a list
+  # rsrc <- sprc(rast_list)
+  # tiff_merge = merge(rsrc)
+  
+  h09v04 = NA
+  h10v03 = NA
+  h10v04 = NA
+  h11v03 = NA
+  h11v04 = NA
+  h12v03 = NA
+  h12v04 = NA
+  h13v03 = NA
+  h13v04 = NA
+
+  h09v04 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h09v04')))
+  h10v03 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h10v03')))
+  h10v04 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h10v04')))
+  h11v03 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h11v03')))
+  h11v04 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h11v04')))
+  h12v03 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h12v03')))
+  h12v04 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h12v04')))
+  h13v03 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h13v03')))
+  h13v04 = raster(intersect(str_subset(paths, paste0("A", day_list$ID[i])), str_subset(paths, 'h13v04')))
+  
+  tiff_merge = merge(h09v04, h10v03, h10v04, h11v03, h11v04, h12v03, h12v04, h13v03, h13v04)
+  tiff_merge = projectRaster(tiff_merge, crs=crs_4326)
+  
+  writeRaster(tiff_merge, 
+            filename=file.path(tmp, paste0(
+              "MOD13A2.A",day_list$ID[i],".tif")),
+            overwrite=TRUE, format="GTiff")
+}
+
+```
+
+2001081 is where it stops
+
+Mask out the Great Lakes Region for MODIS_MYD21A2_Merged data
+
+```{r}
+input = dir_ls("/Volumes/Seagate 8T/MYD21A2_Merged")
+output="/Volumes/Seagate 8T/MYD21A2_Masked"
+dir.create(file.path(output), recursive = TRUE)
+
+lake = readOGR("/Volumes/GoogleDrive/Other computers/Windows_Lab/Aeiral Insectivore Research/aerial-insectivore-nsf/Projects/Chp2_WhatWhereWhen/greatlakes/main_lakes.shp")
+
+
+for (i in 1:length(input)){
+
+map = raster(input[i])
+masked <- mask(x = crop(map, extent(lake)), mask = lake)
+writeRaster(masked, filename=file.path(output, paste0(stri_sub(input[i], -20, -5),"tif")), overwrite=TRUE, format="GTiff")
+
+}
+```
+
+Convert the raster layers into raster brick
+
+```{r}
+list <- list.files(path='D:/MOD13A2_EVI_Merged/', full.names=TRUE)
+
+OutputStack = stack(list)
+
+OutputBrick = brick(OutputStack, values=TRUE)  
+
+OutputPath_Main             = "./data"
+OutputFolder_Rasters     = file.path(OutputPath_Main, "Rasters")
+
+CurrOutputfile = file.path(OutputFolder_Rasters, "6_MOD13A2_EVI.tif")
+dir.create(dirname(CurrOutputfile), showWarnings = F, recursive = T)
+writeRaster(OutputBrick, CurrOutputfile, overwrite=TRUE)
+
+```
+
+```{r}
+# got Error in compareRaster(rasters) : different extent, find which one is different
+extent_df = data.frame()
+for (i in 1:length(list)){
+  df = data.frame(xmin = extent(raster(list[i]))@xmin,
+                            xmax = extent(raster(list[i]))@xmax,
+                            ymin = extent(raster(list[i]))@ymin,
+                            ymax = extent(raster(list[i]))@ymax)
+  extent_df = rbind(extent_df, df)
+}
+notzero_df = diff(as.matrix(extent_df))
+```
+
